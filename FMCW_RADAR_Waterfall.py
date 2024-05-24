@@ -35,100 +35,36 @@
 
 '''FMCW Radar Demo with Phaser (CN0566)
    Jon Kraft, Jan 20 2024'''
-
 # Imports
-import adi
 
 import sys
 import time
 import matplotlib.pyplot as plt
+import numpy
 import numpy as np
 import pyqtgraph as pg
+import scipy
+
+from utils import terminal_reader
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import *
 from pyqtgraph.Qt import QtCore, QtGui
 
-# Instantiate all the Devices
-rpi_ip = "ip:phaser.local"  # IP address of the Raspberry Pi
-sdr_ip = "ip:192.168.2.1"  # "192.168.2.1, or pluto.local"  # IP address of the Transceiver Block
-my_sdr = adi.ad9361(uri=sdr_ip)
-my_phaser = adi.CN0566(uri=rpi_ip, sdr=my_sdr)
 
-# Initialize both ADAR1000s, set gains to max, and all phases to 0
-my_phaser.configure(device_mode="rx")
-my_phaser.load_gain_cal()
-my_phaser.load_phase_cal()
-for i in range(0, 8):
-    my_phaser.set_chan_phase(i, 0)
-
-gain_list = [8, 34, 84, 127, 127, 84, 34, 8]  # Blackman taper
-for i in range(0, len(gain_list)):
-    my_phaser.set_chan_gain(i, gain_list[i], apply_cal=True)
-
-# Setup Raspberry Pi GPIO states
-try:
-    my_phaser._gpios.gpio_tx_sw = 0  # 0 = TX_OUT_2, 1 = TX_OUT_1
-    my_phaser._gpios.gpio_vctrl_1 = 1 # 1=Use onboard PLL/LO source  (0=disable PLL and VCO, and set switch to use external LO input)
-    my_phaser._gpios.gpio_vctrl_2 = 1 # 1=Send LO to transmit circuitry  (0=disable Tx path, and send LO to LO_OUT)
-except:
-    my_phaser.gpios.gpio_tx_sw = 0  # 0 = TX_OUT_2, 1 = TX_OUT_1
-    my_phaser.gpios.gpio_vctrl_1 = 1 # 1=Use onboard PLL/LO source  (0=disable PLL and VCO, and set switch to use external LO input)
-    my_phaser.gpios.gpio_vctrl_2 = 1 # 1=Send LO to transmit circuitry  (0=disable Tx path, and send LO to LO_OUT)
-
-sample_rate = 0.6e6
-center_freq = 2.1e9
-signal_freq = 100e3
-num_slices = 600     # this sets how much time will be displayed on the waterfall plot
-fft_size = 1024 * 4
-plot_freq = 100e3    # x-axis freq range to plot
-img_array = np.ones((num_slices, fft_size))*(-100)
-
-# Configure SDR Rx
-my_sdr.sample_rate = int(sample_rate)
-my_sdr.rx_lo = int(center_freq)  # set this to output_freq - (the freq of the HB100)
-my_sdr.rx_enabled_channels = [0, 1]  # enable Rx1 (voltage0) and Rx2 (voltage1)
-my_sdr.rx_buffer_size = int(fft_size)
-my_sdr.gain_control_mode_chan0 = "manual"  # manual or slow_attack
-my_sdr.gain_control_mode_chan1 = "manual"  # manual or slow_attack
-my_sdr.rx_hardwaregain_chan0 = int(30)  # must be between -3 and 70
-my_sdr.rx_hardwaregain_chan1 = int(30)  # must be between -3 and 70
-# Configure SDR Tx
-my_sdr.tx_lo = int(center_freq)
-my_sdr.tx_enabled_channels = [0, 1]
-my_sdr.tx_cyclic_buffer = True  # must set cyclic buffer to true for the tdd burst mode.  Otherwise Tx will turn on and off randomly
-my_sdr.tx_hardwaregain_chan0 = -88  # must be between 0 and -88
-my_sdr.tx_hardwaregain_chan1 = -0  # must be between 0 and -88
+reader = terminal_reader.TerminalDataReader(port="COM3", start_marker=65535, end_marker=65534)
+reader.start()
+sample_rate = 500e3
+signal_freq = 0
+num_slices = 600  # this sets how much time will be displayed on the waterfall plot
+fft_size = 1024*8
+plot_freq = 100e3  # x-axis freq range to plot
+img_array = np.ones((num_slices, fft_size)) * (-100)
 
 # Configure the ADF4159 Rampling PLL
-output_freq = 12.145e9
+output_freq = 4.8e9
+freq = output_freq
 BW = 500e6
-num_steps = 500
-ramp_time = 0.5e3  # us
-my_phaser.frequency = int(output_freq / 4)  # Output frequency divided by 4
-my_phaser.freq_dev_range = int(
-    BW / 4
-)  # frequency deviation range in Hz.  This is the total freq deviation of the complete freq ramp
-my_phaser.freq_dev_step = int(
-    (BW/4) / num_steps
-)  # frequency deviation step in Hz.  This is fDEV, in Hz.  Can be positive or negative
-my_phaser.freq_dev_time = int(
-    ramp_time
-)  # total time (in us) of the complete frequency ramp
-print("requested freq dev time = ", ramp_time)
-ramp_time = my_phaser.freq_dev_time
-ramp_time_s = ramp_time / 1e6
-print("actual freq dev time = ", ramp_time)
-my_phaser.delay_word = 4095  # 12 bit delay word.  4095*PFD = 40.95 us.  For sawtooth ramps, this is also the length of the Ramp_complete signal
-my_phaser.delay_clk = "PFD"  # can be 'PFD' or 'PFD*CLK1'
-my_phaser.delay_start_en = 0  # delay start
-my_phaser.ramp_delay_en = 0  # delay between ramps.
-my_phaser.trig_delay_en = 0  # triangle delay
-my_phaser.ramp_mode = "continuous_triangular"  # ramp_mode can be:  "disabled", "continuous_sawtooth", "continuous_triangular", "single_sawtooth_burst", "single_ramp_burst"
-my_phaser.sing_ful_tri = (
-    0  # full triangle enable/disable -- this is used with the single_ramp_burst mode
-)
-my_phaser.tx_trig_en = 0  # start a ramp with TXdata
-my_phaser.enable = 0  # 0 = PLL enable.  Write this last to update all the registers
+ramp_time_s = 0.002
 
 # Print config
 print(
@@ -137,33 +73,19 @@ CONFIG:
 Sample rate: {sample_rate}MHz
 Num samples: 2^{Nlog2}
 Bandwidth: {BW}MHz
-Ramp time: {ramp_time}ms
 Output frequency: {output_freq}MHz
 IF: {signal_freq}kHz
 """.format(
         sample_rate=sample_rate / 1e6,
         Nlog2=int(np.log2(fft_size)),
         BW=BW / 1e6,
-        ramp_time=ramp_time / 1e3,
         output_freq=output_freq / 1e6,
         signal_freq=signal_freq / 1e3,
     )
 )
 
-# Create a sinewave waveform
-fs = int(my_sdr.sample_rate)
-N = int(my_sdr.rx_buffer_size)
-fc = int(signal_freq / (fs / N)) * (fs / N)
-ts = 1 / float(fs)
-t = np.arange(0, N * ts, ts)
-i = np.cos(2 * np.pi * t * fc) * 2 ** 14
-q = np.sin(2 * np.pi * t * fc) * 2 ** 14
-iq = 1 * (i + 1j * q)
-
-# Send data
-my_sdr._ctx.set_timeout(0)
-my_sdr.tx([iq * 0.5, iq])  # only send data to the 2nd channel (that's all we need)
-
+fs = int(sample_rate)
+N = 1024*8
 c = 3e8
 default_chirp_bw = 500e6
 N_frame = fft_size
@@ -179,10 +101,10 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("Interactive FFT")
         self.setGeometry(0, 0, 400, 400)  # (x,y, width, height)
-        #self.setFixedWidth(600)
+        # self.setFixedWidth(600)
         self.setWindowState(QtCore.Qt.WindowMaximized)
-        self.num_rows = 12
-        self.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False) #remove the window's close button
+        self.num_rows = 13
+        self.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)  # remove the window's close button
         self.UiComponents()
         self.show()
 
@@ -240,11 +162,10 @@ class Window(QMainWindow):
         self.set_bw.setMaximumWidth(200)
         self.set_bw.pressed.connect(self.set_range_res)
         layout.addWidget(self.set_bw, 5, 0, 1, 1)
-        
+
         self.quit_button = QPushButton("Quit")
         self.quit_button.pressed.connect(self.end_program)
         layout.addWidget(self.quit_button, 30, 0, 4, 4)
-
 
         # waterfall level slider
         self.low_slider = QSlider(Qt.Horizontal)
@@ -272,7 +193,7 @@ class Window(QMainWindow):
         self.water_label.setAlignment(Qt.AlignCenter)
         self.water_label.setMinimumWidth(100)
         self.water_label.setMaximumWidth(200)
-        layout.addWidget(self.water_label, 7, 0,1,1)
+        layout.addWidget(self.water_label, 7, 0, 1, 1)
         self.low_label = QLabel("LOW LEVEL: %0.0f" % (self.low_slider.value()))
         self.low_label.setFont(font)
         self.low_label.setAlignment(Qt.AlignLeft)
@@ -306,12 +227,25 @@ class Window(QMainWindow):
         self.steer_label.setAlignment(Qt.AlignLeft)
         self.steer_label.setMinimumWidth(100)
         self.steer_label.setMaximumWidth(200)
-        layout.addWidget(self.steer_label, 14, 1,1,2)
+        layout.addWidget(self.steer_label, 14, 1, 1, 2)
+
+        # Signal plot
+        self.signal_plot = pg.plot()
+        self.signal_plot.setMinimumWidth(400)
+        self.signal_curve = self.signal_plot.plot(freq, pen={'color': 'y', 'width': 2})
+        title_style = {"size": "20pt"}
+        label_style = {"color": "#FFF", "font-size": "14pt"}
+        self.signal_plot.setLabel("bottom", text="Time", units="conv", **label_style)
+        self.signal_plot.setLabel("left", text="Value", units="", **label_style)
+        self.signal_plot.setTitle("Received Signal1", **title_style)
+        layout.addWidget(self.signal_plot, self.num_rows, 2, 1, 1)
+        self.signal_plot.setYRange(0, 4096)
+        self.signal_plot.setXRange(0, fft_size)
 
         # FFT plot
         self.fft_plot = pg.plot()
-        self.fft_plot.setMinimumWidth(600)
-        self.fft_curve = self.fft_plot.plot(freq, pen={'color':'y', 'width':2})
+        self.fft_plot.setMinimumWidth(400)
+        self.fft_curve = self.fft_plot.plot(freq, pen={'color': 'y', 'width': 2})
         title_style = {"size": "20pt"}
         label_style = {"color": "#FFF", "font-size": "14pt"}
         self.fft_plot.setLabel("bottom", text="Frequency", units="Hz", **label_style)
@@ -327,13 +261,15 @@ class Window(QMainWindow):
         self.waterfall.addItem(self.imageitem)
         # Use a viridis colormap
         pos = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
-        color = np.array([[68, 1, 84,255], [59, 82, 139,255], [33, 145, 140,255], [94, 201, 98,255], [253, 231, 37,255]], dtype=np.ubyte)
+        color = np.array(
+            [[68, 1, 84, 255], [59, 82, 139, 255], [33, 145, 140, 255], [94, 201, 98, 255], [253, 231, 37, 255]],
+            dtype=np.ubyte)
         lut = pg.ColorMap(pos, color).getLookupTable(0.0, 1.0, 256)
         self.imageitem.setLookupTable(lut)
-        self.imageitem.setLevels([0,1])
+        self.imageitem.setLevels([0, 1])
         # self.imageitem.scale(0.35, sample_rate / (N))  # this is deprecated -- we have to use setTransform instead
         tr = QtGui.QTransform()
-        tr.translate(0,-sample_rate/2)
+        tr.translate(0, -sample_rate / 2)
         tr.scale(0.35, sample_rate / (N))
         self.imageitem.setTransform(tr)
         zoom_freq = 35e3
@@ -342,7 +278,7 @@ class Window(QMainWindow):
         self.waterfall.setLabel("left", "Frequency", units="Hz", **label_style)
         self.waterfall.setLabel("bottom", "Time", units="sec", **label_style)
         layout.addWidget(self.waterfall, 0 + self.num_rows + 1, 2, self.num_rows, 1)
-        self.img_array = np.ones((num_slices, fft_size))*(-100)
+        self.img_array = np.ones((num_slices, fft_size)) * (-100)
 
         widget.setLayout(layout)
         # setting this widget as central widget of the main window
@@ -377,14 +313,14 @@ class Window(QMainWindow):
 		"""
         self.steer_label.setText("%0.0f DEG" % (self.steer_slider.value()))
         phase_delta = (
-            2
-            * 3.14159
-            * 10.25e9
-            * 0.014
-            * np.sin(np.radians(self.steer_slider.value()))
-            / (3e8)
+                2
+                * 3.14159
+                * 10.25e9
+                * 0.014
+                * np.sin(np.radians(self.steer_slider.value()))
+                / (3e8)
         )
-        my_phaser.set_beam_phase_diff(np.degrees(phase_delta))
+        # my_phaser.set_beam_phase_diff(np.degrees(phase_delta))
 
     def set_range_res(self):
         """ Sets the Chirp bandwidth
@@ -401,16 +337,16 @@ class Window(QMainWindow):
             self.fft_plot.setXRange(0, range_x)
         else:
             plot_dist = False
-            self.fft_plot.setXRange(signal_freq, signal_freq+plot_freq)
-        my_phaser.freq_dev_range = int(bw / 4)  # frequency deviation range in Hz
-        my_phaser.enable = 0
+            self.fft_plot.setXRange(signal_freq, signal_freq + plot_freq)
+        # my_phaser.freq_dev_range = int(bw / 4)  # frequency deviation range in Hz
+        # my_phaser.enable = 0
 
     def end_program(self):
         """ Gracefully shutsdown the program and Pluto
 		Returns:
 			None
 		"""
-        my_sdr.tx_destroy_buffer()
+        # my_sdr.tx_destroy_buffer()
         self.close()
 
     def change_x_axis(self, state):
@@ -428,7 +364,7 @@ class Window(QMainWindow):
             self.fft_plot.setXRange(0, range_x)
         else:
             plot_dist = False
-            self.fft_plot.setXRange(signal_freq, signal_freq+plot_freq)
+            self.fft_plot.setXRange(signal_freq, signal_freq + plot_freq)
 
 
 # create pyqt5 app
@@ -447,8 +383,15 @@ def update():
     global index, plot_dist, freq, dist
     label_style = {"color": "#FFF", "font-size": "14pt"}
 
-    data = my_sdr.rx()
-    data = data[0] + data[1]
+    data = reader.read()  # my_sdr.rx()
+
+    #data = scipy.signal.hilbert(data, 1024)
+#    data = data[0] + data[1]
+    if len(data) == 0:
+        return
+    average = numpy.average(data)
+    data_raw = data
+    data -= average
     win_funct = np.blackman(len(data))
     y = data * win_funct
     sp = np.absolute(np.fft.fft(y))
@@ -456,7 +399,7 @@ def update():
     s_mag = np.abs(sp) / np.sum(win_funct)
     s_mag = np.maximum(s_mag, 10 ** (-15))
     s_dbfs = 20 * np.log10(s_mag / (2 ** 11))
-
+    win.signal_curve.setData(np.arange(fft_size), data_raw)
     if plot_dist:
         win.fft_curve.setData(dist, s_dbfs)
         win.fft_plot.setLabel("bottom", text="Distance", units="m", **label_style)
@@ -477,6 +420,7 @@ def update():
 timer = QtCore.QTimer()
 timer.timeout.connect(update)
 timer.start(0)
+
 
 # start the app
 sys.exit(App.exec())
